@@ -1,62 +1,129 @@
-import scripts.email_sender as ems
 import scripts.input_formater as ifo
 import pandas as pd
-import argparse
+import argparse, os, glob, re
+import configparser
 
 from PIL import Image
 
 from enum import Enum, auto
+from exchangelib import Mailbox, Account, HTMLBody, Message, Credentials, FileAttachment
+
+def check_file(auth_file_path):
+    if not os.path.isfile(auth_file_path):
+        directory = os.path.dirname(auth_file_path)
+        new_files = glob.glob(os.path.join(directory, '*.xlsx'))
+        if new_files:
+            auth_file_path = new_files[0]
+    return auth_file_path
+
+def print_message(message):
+    print('='*80)
+    print(f"To: {message.to_recipients}, Subject: {message.subject}")
+    print("Body:", str(message.body)[:500])
+    print('='*80)
 
 class COLS(Enum):
+    NAME = auto()
     EMAIL = auto()
+    SALARY = auto()
     CC = auto()
-    LNNS = auto()
-    LCAT = auto()
-    NCAT = auto()
-    NSAL = auto()
-"""
-ASUNTO: 
-CORREO - Cc , APELLIDOS&NOMBRES - CAMPOS DE REEMPLAZO...
-"""
+
+keep = ['de', 'para', 'la', 'el', 'en']
+
+def keep_cap(string, it):
+    '''
+    Returns a generator by tokenizing a string and checking each word before capitalizing
+    '''
+    string_tokens = string.lower().split()
+    for i in string_tokens:
+        if i in it:
+            yield i
+        else:
+            yield i.capitalize()
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Email mass sender')
-    parser.add_argument('input', type=str, help='Path to the excel file')
-    parser.add_argument('template', type=str, help='Path to the template image')
-    parser.add_argument('htmlf', type=str, help='Path to the html injected to the message')
+    parser.add_argument('auth', type=str, help='Path to the configuration file')
 
     args = parser.parse_args()
-    sender = ems.EmailSender('compensaciones@cajaarequipa.pe',
-                             'Caja2015', 'webmail.cajaarequipa.pe')
-    in_data = pd.read_excel(args.input, header=None, engine='openpyxl')
-    in_data.columns = [COLS.EMAIL, COLS.CC, COLS.LNNS, COLS.LCAT, COLS.NCAT, COLS.NSAL]
-    image = Image.open(args.template)
 
-    subject = in_data.iloc[0, 0]
-    data_table = in_data.iloc[2:]
+    config = configparser.ConfigParser()
+    config.read(args.auth)
+
+    config = config['ALL']
+
+    from_email = config['EMAIL']
+    from_password = config['PASSWORD']
+    
+    credentials = Credentials(from_email, from_password)
+    account = Account(from_email, credentials=credentials, autodiscover=True)
+    
+    fn_input = check_file(config['INPUT_PATH'])
+
+    try:
+        data_table = pd.read_excel(fn_input, engine='openpyxl')
+        if os.path.isfile(fn_input):
+            os.remove(fn_input)
+
+    except FileNotFoundError as e:
+        print("Mass email sender: Can not find file input")
+        exit(0)
+
+    data_table.columns = [COLS.NAME, COLS.EMAIL, COLS.SALARY, COLS.CC]
+    image = Image.open('template/bonus.png')
+
+    subject = re.sub(r'[^ -~¡¿]+', '', config['SUBJECT'])
 
     meta = [
-        ['', (139, 293), 15, 'Calibri', '#18243d', {'weight': 'bold', 'style': 'italic'}],
-        ['', (458, 514), 12, 'Calibri', '#ffffff', {'weight': 'normal', 'style': 'normal'}],
-        ['', (438, 548), 12, 'Calibri', '#ffffff', {'weight': 'normal', 'style': 'normal'}],
-        ['', (408, 582), 12, 'Calibri', '#ffffff', {'weight': 'normal', 'style': 'normal'}]
+        ['', (334,360), 19, 'Calibri', '#001c56', {'weight': 'bold', 'style': 'italic'}],
+        ['', (702,665), 14, 'Calibri', '#18243d', {'weight': 'bold', 'style': 'italic'}]
     ]
 
-    with open(args.htmlf, 'r', encoding='utf-8') as file:
-        html_injected = file.read()
-
     print(f"Subject: [{subject}], #mails: {data_table.shape[0]}")
-    print(data_table.head())
+    print(data_table.info())
+
+    data_table[COLS.NAME] = data_table[COLS.NAME].apply(lambda x: str(x).title())
+    data_table[COLS.SALARY] = data_table[COLS.SALARY].apply(lambda x: f"{float(x):,.2f}")
 
     for index, row in data_table.iterrows():
-        sender.push_message([row[COLS.EMAIL], row[COLS.CC]], subject)
-        meta[0][0] = row[COLS.LNNS]
-        meta[1][0] = row[COLS.LCAT]
-        meta[2][0] = row[COLS.NCAT]
-        meta[3][0] = row[COLS.NSAL]
-        img = ifo.add_text_to_image(image, meta)
-        sender.attach_image(img, html_injected)
-        #imgpil = Image.open(img)
-        #imgpil.convert("RGB").save('input/test.jpg', "JPEG")
+        meta[0][0] = row[COLS.NAME]
+        meta[1][0] = row[COLS.SALARY]
+        img_buffer = ifo.add_text_to_image(image, meta)
+        """
+        img = Image.open(img_buffer)
 
-    sender.send()
+        img.save("imagen.png", "PNG")
+
+        continue"""
+
+        attachment = FileAttachment(
+            name='Advice.png',
+            content=img_buffer.getvalue(),
+            content_type='image/png'
+        )
+        
+        to_recipients = [Mailbox(email_address=row[COLS.EMAIL])]
+        cc_recipients = [Mailbox(email_address=row[COLS.CC])]
+
+        message = Message(
+            account=account,
+            subject=subject,
+            to_recipients=to_recipients,
+            cc_recipients=cc_recipients,
+            body=HTMLBody(f"""
+                <html>
+                <body>
+                    <div>
+                        <img src="cid:Advice.png" alt="AdviceImg" style="max-width: 100%; height: auto;">
+                    </div>
+                </body>
+                </html>
+            """),
+            attachments=[attachment]
+        )
+
+        print_message(message)
+
+        message.clean()
+
+        #message.send_and_save()

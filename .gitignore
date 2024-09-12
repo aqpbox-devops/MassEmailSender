@@ -1,2 +1,6 @@
 scripts/__pycache__/
 temp/
+input/
+logs/
+config/*.conf
+!config/auth-template.conf
